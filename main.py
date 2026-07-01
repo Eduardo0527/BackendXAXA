@@ -1,6 +1,7 @@
 import os
 import shutil
 from dotenv import load_dotenv
+import requests
 
 from fastapi import FastAPI, Request, File, UploadFile, Form, status, WebSocket, WebSocketDisconnect, Header
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -19,12 +20,13 @@ from werkzeug.utils import secure_filename
 import mysql.connector
 from mysql.connector import pooling
 
+from pydantic import BaseModel
+
 
 BUFFER_MAXLEN = 100
 live_buffers = {}
 
 app = FastAPI()
-
 
 load_dotenv()
 
@@ -48,13 +50,10 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 db_pass = os.getenv("DATABASE_PASSWORD")
 
 dbconfig = {
-    "host": os.getenv("DATABASE_HOST"),
-    "port": int(os.getenv("DATABASE_PORT", 26728)),
-    "user": os.getenv("DATABASE_USER"),
-    "password": os.getenv("DATABASE_PASSWORD"),
-    "database": os.getenv("DATABASE_NAME", "defaultdb"),
-    "ssl_ca": "aiven_ca.pem", 
-    "ssl_disabled": False 
+    "host": "localhost",
+    "user": "root",
+    "password": db_pass, 
+    "database": "PROJETOMCMP"
 }
 
 db_pool = pooling.MySQLConnectionPool(
@@ -63,6 +62,10 @@ db_pool = pooling.MySQLConnectionPool(
     pool_reset_session=True,
     **dbconfig
 )
+
+class TokenRequest(BaseModel):
+    username: str 
+    token: str
 
 class ConnectionManager:
     def __init__(self):
@@ -138,6 +141,26 @@ async def sensor_input(websocket: WebSocket):
         await websocket.close()
 
 
+@app.post('/register-token')
+def register_expo_token(data: TokenRequest):
+    con = db_pool.get_connection()
+    cursor = con.cursor()
+    try:
+        # Update the user's push token in the database
+        query = "UPDATE users SET push_token = %s WHERE p_username = %s;"
+        cursor.execute(query, (data.token, data.username))
+        con.commit()
+        
+        if cursor.rowcount == 0:
+            return JSONResponse({'error': 'User not found'}, status_code=404)
+            
+        return JSONResponse({"message": "Token registered successfully"}, status_code=200)
+    except Exception as e:
+        return JSONResponse({'error': str(e)}, status_code=500)
+    finally:
+        cursor.close()
+        con.close()
+
 @app.post('/upload-audio')
 async def upload_sensor_data(
     request: Request,
@@ -152,21 +175,49 @@ async def upload_sensor_data(
     severity = "HIGH" if db > 80.0 else "LOW"
     classification = "Normal" 
     
-    con    = db_pool.get_connection()
+    con = db_pool.get_connection()
     cursor = con.cursor()
     try:
         hashed_key = hashlib.sha256(x_api_key.encode()).hexdigest()
-        cursor.execute("SELECT device_id FROM devices WHERE api_key = %s;", (hashed_key,))
+        
+        # Modified query to fetch both the device ID and the user's push token
+        query = """
+            SELECT d.device_id, u.push_token 
+            FROM devices d
+            JOIN users u ON d.p_id = u.p_id
+            WHERE d.api_key = %s;
+        """
+        cursor.execute(query, (hashed_key,))
         row = cursor.fetchone()
+        
         if not row:
             return JSONResponse({'error': 'Invalid API Key'}, status_code=401)
+            
+        device_id, push_token = row[0], row[1]
+        
         if is_alert:
             classification = f"Ruído de {db:.1f}dB registrado: {room}"
             cursor.execute(
                 "INSERT INTO sounds (sound_description, device_id) VALUES (%s, %s);",
-                (classification, row[0])
+                (classification, device_id)
             )
             con.commit()
+            
+            if push_token:
+                expo_url = "https://exp.host/--/api/v2/push/send"
+                message = {
+                    "to": push_token,
+                    "sound": "default",
+                    "title": "🚨 Alerta de Ruído!",
+                    "body": classification,
+                    "data": {"room": room, "db": db}
+                }
+                
+                try:
+                    requests.post(expo_url, json=message, timeout=3)
+                except Exception as e:
+                    print(f"Failed to send push notification: {e}")
+                    
     finally:
         cursor.close()
         con.close()
@@ -350,4 +401,3 @@ def success(name: str):
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host='0.0.0.0', port=5000)
-    
