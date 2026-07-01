@@ -50,10 +50,12 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 db_pass = os.getenv("DATABASE_PASSWORD")
 
 dbconfig = {
-    "host": "localhost",
-    "user": "root",
-    "password": db_pass, 
-    "database": "PROJETOMCMP"
+    "host": os.getenv("DATABASE_HOST"),
+    "port": int(os.getenv("DATABASE_PORT", 26728)),  # Porta do Aiven (padrão do print anterior)
+    "user": os.getenv("DATABASE_USER"),
+    "password": os.getenv("DATABASE_PASSWORD"), 
+    "database": os.getenv("DATABASE_NAME", "defaultdb"),
+    "ssl_disabled": False  # Força o uso de SSL exigido pelo Aiven
 }
 
 db_pool = pooling.MySQLConnectionPool(
